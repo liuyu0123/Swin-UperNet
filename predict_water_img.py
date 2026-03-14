@@ -61,15 +61,12 @@ def get_model(args):
 
 def preprocess_image(image_path, bands=3, img_size=256):
     """预处理单张图像"""
-    # 读取图像
     image = Image.open(image_path)
-    original_size = image.size  # (W, H)
+    original_size = image.size
     
-    # 调整尺寸
     image = image.resize((img_size, img_size), Image.BILINEAR)
     image = np.array(image).astype(np.float32)
     
-    # 处理通道
     if len(image.shape) == 2:
         image = np.stack([image] * bands, axis=0)
     else:
@@ -80,21 +77,15 @@ def preprocess_image(image_path, bands=3, img_size=256):
         elif image.shape[0] > bands:
             image = image[:bands]
     
-    # 归一化
     image = image / 255.0
-    
-    # 添加 batch 维度
-    image = torch.from_numpy(image).unsqueeze(0)  # (1, C, H, W)
+    image = torch.from_numpy(image).unsqueeze(0)
     
     return image, original_size
 
 
 def postprocess_prediction(pred, original_size, num_classes=2):
     """后处理预测结果"""
-    # pred: (1, H, W) -> (H, W)
     pred = pred.squeeze(0).cpu().numpy()
-    
-    # 调整回原始尺寸
     pred_img = Image.fromarray((pred * 127).astype(np.uint8))
     pred_img = pred_img.resize(original_size, Image.NEAREST)
     pred = np.array(pred_img) // 127
@@ -103,15 +94,15 @@ def postprocess_prediction(pred, original_size, num_classes=2):
 
 
 def visualize_result(image_path, pred, save_path=None, show=True):
-    """可视化推理结果"""
+    """可视化推理结果 - 水面用透明红色表示"""
     # 读取原图
     image = Image.open(image_path).convert('RGB')
     image = np.array(image)
     
-    # 创建颜色映射
+    # 创建颜色映射 - 水面用红色
     colors = {
         0: [0, 0, 0],       # 背景 - 黑色
-        1: [0, 0, 255],     # 水 - 蓝色
+        1: [255, 0, 0],     # 水 - 红色
     }
     
     # 创建彩色预测图
@@ -119,8 +110,11 @@ def visualize_result(image_path, pred, save_path=None, show=True):
     for cls, color in colors.items():
         pred_color[pred == cls] = color
     
-    # 创建叠加图
-    overlay = image * 0.6 + pred_color * 0.4
+    # 创建叠加图 - 水面透明红色
+    overlay = image.copy().astype(np.float32)
+    # 水面区域 (pred == 1) 叠加红色，透明度 40%
+    water_mask = pred == 1
+    overlay[water_mask] = overlay[water_mask] * 0.6 + np.array([255, 0, 0]) * 0.4
     overlay = overlay.astype(np.uint8)
     
     # 绘图
@@ -135,13 +129,13 @@ def visualize_result(image_path, pred, save_path=None, show=True):
     axes[1].axis('off')
     
     axes[2].imshow(overlay)
-    axes[2].set_title('Overlay')
+    axes[2].set_title('Overlay (Red = Water)')
     axes[2].axis('off')
     
     # 添加图例
     legend_elements = [
         mpatches.Patch(color=[0, 0, 0], label='Background'),
-        mpatches.Patch(color=[0, 0, 1], label='Water')
+        mpatches.Patch(color=[1, 0, 0], label='Water')
     ]
     fig.legend(handles=legend_elements, loc='lower center', ncol=2)
     
