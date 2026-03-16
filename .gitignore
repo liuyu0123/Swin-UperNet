@@ -3,3 +3,5 @@ log
 pth_files
 predictions
 result.png
+upernet_training_log.csv
+#git rm --cached upernet_training_log.csv
