@@ -5,3 +5,5 @@ predictions
 result.png
 upernet_training_log.csv
 #git rm --cached upernet_training_log.csv
+upernet_training_log_standard_model_info.txt
+upernet_training_log_standard.csv

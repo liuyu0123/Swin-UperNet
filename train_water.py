@@ -3,6 +3,9 @@
 import os
 import csv
 import argparse
+import time
+from pathlib import Path
+
 import torch
 import torch.nn as nn
 import numpy as np
@@ -62,6 +65,94 @@ parser.add_argument('--MODEL_TYPE', type=str, default='upernet',
 parser.add_argument('--BACKBONE_TYPE', type=str, default=None)
 parser.add_argument('--ATTENTION_TYPE', type=str, default=None, choices=['senet', 'ecanet', 'cbam', 'vit', 'self_atten'])
 parser.add_argument('--INIT_TYPE', type=str, default='kaiming', choices=['kaiming', 'normal', 'xavier', 'orthogonal'])
+
+
+def get_model_info(model):
+    """获取模型静态信息"""
+    total_params = sum(p.numel() for p in model.parameters())
+    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    return {
+        'total_params': total_params,
+        'trainable_params': trainable_params,
+        'model_size_mb': total_params * 4 / (1024 * 1024),
+    }
+
+
+def compute_metrics_from_evaluator(evaluator, num_classes):
+    """从 Evaluator 提取核心指标"""
+    Acc = evaluator.OverAll_Accuracy()
+    Kappa = evaluator.Kappa()
+    mIoU, IoU = evaluator.mean_Intersection_over_Union()
+    mPrecision, Precision = evaluator.Precision()
+    mRecall, Recall = evaluator.Recall()
+    mF1_score, F1_score = evaluator.F1_Score()
+    
+    return {
+        'acc': Acc,
+        'kappa': Kappa,
+        'miou': mIoU,
+        'precision': mPrecision,
+        'recall': mRecall,
+        'f1': mF1_score,
+    }
+
+
+class MetricsLogger:
+    """简化版指标记录器，生成标准格式CSV"""
+    
+    def __init__(self, save_path, model_info):
+        self.save_path = Path(save_path)
+        self.save_path.parent.mkdir(parents=True, exist_ok=True)
+        self.model_info = model_info
+        
+        self.header = [
+            'epoch',
+            'train_loss', 'train_precision', 'train_recall', 'train_f1', 'train_miou',
+            'val_loss', 'val_precision', 'val_recall', 'val_f1', 'val_miou',
+            'inference_time_ms', 'fps', 'learning_rate'
+        ]
+        self.rows = []
+        
+    def log_epoch(self, epoch, train_loss, train_metrics, val_loss, val_metrics, 
+                  inference_time_ms, fps, lr):
+        """记录一轮数据"""
+        row = {
+            'epoch': epoch,
+            'train_loss': f"{train_loss:.6f}",
+            'train_precision': f"{train_metrics.get('precision', 0):.6f}",
+            'train_recall': f"{train_metrics.get('recall', 0):.6f}",
+            'train_f1': f"{train_metrics.get('f1', 0):.6f}",
+            'train_miou': f"{train_metrics.get('miou', 0):.6f}",
+            'val_loss': f"{val_loss:.6f}",
+            'val_precision': f"{val_metrics.get('precision', 0):.6f}",
+            'val_recall': f"{val_metrics.get('recall', 0):.6f}",
+            'val_f1': f"{val_metrics.get('f1', 0):.6f}",
+            'val_miou': f"{val_metrics.get('miou', 0):.6f}",
+            'inference_time_ms': f"{inference_time_ms:.4f}",
+            'fps': f"{fps:.2f}",
+            'learning_rate': f"{lr:.8f}",
+        }
+        self.rows.append(row)
+        
+    def save(self):
+        """保存CSV"""
+        with open(self.save_path, 'w', newline='') as f:
+            writer = csv.DictWriter(f, fieldnames=self.header)
+            writer.writeheader()
+            writer.writerows(self.rows)
+        print(f"Standard training log saved to {self.save_path}")
+        
+    def save_model_info(self):
+        """保存模型信息"""
+        info_path = self.save_path.parent / f"{self.save_path.stem}_model_info.txt"
+        with open(info_path, 'w') as f:
+            f.write(f"Model Type: {self.model_info.get('model_type', 'Unknown')}\n")
+            f.write(f"Backbone: {self.model_info.get('backbone', 'Unknown')}\n")
+            f.write(f"Total Parameters: {self.model_info['total_params']:,}\n")
+            f.write(f"Trainable Parameters: {self.model_info['trainable_params']:,}\n")
+            f.write(f"Model Size: {self.model_info['model_size_mb']:.2f} MB\n")
+            f.write(f"Number of Classes: {self.model_info.get('num_classes', 'Unknown')}\n")
+            f.write(f"Input Size: {self.model_info.get('img_size', 'Unknown')}\n")
 
 
 def main():
@@ -137,14 +228,24 @@ def main():
               f"|init type:{args.INIT_TYPE}.\n")
         print("Training on GPU: {}".format(args.GPU_ID))
 
-    # 类别权重（根据数据分布调整）
+    # 获取模型信息
+    model_info = get_model_info(model)
+    model_info.update({
+        'model_type': args.MODEL_TYPE,
+        'backbone': args.BACKBONE_TYPE,
+        'num_classes': args.NUM_CLASS,
+        'img_size': args.IMG_SIZE,
+    })
+    print(f"Model: {model_info['total_params']:,} params, {model_info['model_size_mb']:.2f} MB")
+
+    # 类别权重
     if args.NUM_CLASS == 2:
-        weight = np.array([1.0, 2.0], np.float32)  # 二分类示例
+        weight = np.array([1.0, 2.0], np.float32)
     else:
         weight = np.array([4.204673196, 48.29108289, 11.4838323], np.float32)
     weight = torch.from_numpy(weight.astype(np.float32)).cuda()
 
-    # 损失函数选择
+    # 损失函数
     if args.LOSS_TYPE == 'ce':
         criterion = nn.CrossEntropyLoss(weight=weight, ignore_index=-1, reduction='mean')
     elif args.LOSS_TYPE == 'focal':
@@ -152,7 +253,7 @@ def main():
     else:
         raise NotImplementedError(f'loss type [{args.LOSS_TYPE}] is not implemented')
 
-    # 优化器选择
+    # 优化器
     if args.OPTIMIZER_TYPE == 'sgd':
         optimizer = optim.SGD(model.parameters(), lr=args.INIT_LR, momentum=args.MOMENTUM, weight_decay=args.WEIGHT_DECAY)
     elif args.OPTIMIZER_TYPE == 'adam':
@@ -160,7 +261,7 @@ def main():
     else:
         raise NotImplementedError(f'optimizer type [{args.OPTIMIZER_TYPE}] is not implemented')
 
-    # 学习率衰减方式选择
+    # 学习率衰减
     if args.LR_SCHEDULER == 'step':
         lr_scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=args.LR_STEP, gamma=args.STEP_RATIO)
     elif args.LR_SCHEDULER == 'exp':
@@ -183,11 +284,12 @@ def main():
 
     cudnn.benchmark = True
 
-    trainer = Trainer(args, model, criterion, optimizer, train_loader, test_loader)
+    # 创建指标记录器（新增标准格式CSV）
+    standard_log_path = f'{args.MODEL_TYPE}_training_log_standard.csv'
+    metrics_logger = MetricsLogger(standard_log_path, model_info)
+    metrics_logger.save_model_info()
 
-    print('Starting Epoch:', trainer.args.START_EPOCH)
-    print('Total Epoches:', trainer.args.EPOCHS)
-
+    # 保留原有的详细CSV
     with open(f'{args.MODEL_TYPE}_training_log.csv', 'w', newline='') as f:
         writer = csv.writer(f)
         writer.writerow(['epoch', 'train_loss', 'val_loss', 'Acc', 'Kappa', 'mIoU', 
@@ -195,30 +297,50 @@ def main():
                         'Recall', 'Recall0', 'Recall1', 'F1_score', 'F1_score0', 'F1_score1',
                         'F2_score', 'F2_score0', 'F2_score1'])
 
+    trainer = Trainer(args, model, criterion, optimizer, train_loader, test_loader)
+
+    print('Starting Epoch:', trainer.args.START_EPOCH)
+    print('Total Epoches:', trainer.args.EPOCHS)
+
     for epoch in range(trainer.args.EPOCHS):
         print("Start training on GPU:{}...".format(args.GPU_ID))
-        train_loss = trainer.training(epoch)
+        train_loss, train_metrics = trainer.training(epoch)
         lr_scheduler.step()
         current_lr = lr_scheduler.get_last_lr()[0]
         print("Current learning rate is:", current_lr)
         print("Training over.\n")
 
         print(f"Start validating on GPU:{args.GPU_ID}...")
-        val_loss, Acc, Kappa, mIoU, mIoU0, mIoU1, FWIoU, Precision, Precision0, Precision1, \
-        Recall, Recall0, Recall1, F1_score, F1_score0, F1_score1, F2_score, F2_score0, F2_score1 = trainer.validation(epoch)
+        val_loss, val_metrics, inference_time_ms, fps = trainer.validation(epoch)
         print("Validating over.\n")
 
+        # 保存模型
         if (epoch + 1) % 1 == 0:
             torch.save(model.state_dict(), 
                       'pth_files/%s-epoch%d-loss%.3f-val_loss%.3f.pth' % 
                       (args.MODEL_TYPE, (epoch+1), train_loss, val_loss))
 
+        # 记录到原有详细CSV
         with open(f'{args.MODEL_TYPE}_training_log.csv', 'a', newline='') as f:
             writer = csv.writer(f)
-            writer.writerow([epoch+1, train_loss, val_loss, Acc, Kappa, mIoU, 
-                            mIoU0, mIoU1, FWIoU, Precision, Precision0, Precision1,
-                            Recall, Recall0, Recall1, F1_score, F1_score0, F1_score1,
-                            F2_score, F2_score0, F2_score1])
+            # 从 trainer 获取详细指标
+            writer.writerow([epoch+1, train_loss, val_loss] + trainer.get_last_detailed_metrics())
+
+        # 记录到新增标准CSV
+        metrics_logger.log_epoch(
+            epoch + 1, 
+            train_loss, 
+            train_metrics,
+            val_loss, 
+            val_metrics,
+            inference_time_ms,
+            fps,
+            current_lr
+        )
+
+    # 保存标准CSV
+    metrics_logger.save()
+    print(f"Best Val mIoU: {trainer.best_miou:.4f}")
 
 
 class Trainer(object):
@@ -230,12 +352,21 @@ class Trainer(object):
         self.train_loader = train_loader
         self.val_loader = val_loader
         self.evaluator = Evaluator(self.args.NUM_CLASS)
+        self.best_miou = 0.0
+        self.last_detailed_metrics = []
+
+    def get_last_detailed_metrics(self):
+        """获取上一轮验证的详细指标"""
+        return self.last_detailed_metrics
 
     def training(self, epoch):
         self.model.train()
         train_loss = 0.0
         train_loader = tqdm(self.train_loader)
         num_batch = len(self.train_loader)
+        
+        # 新增：计算训练集指标
+        train_evaluator = Evaluator(self.args.NUM_CLASS)
 
         for i, data in enumerate(train_loader):
             img, lbl = data
@@ -253,9 +384,20 @@ class Trainer(object):
 
             train_loss += loss.item()
             train_loader.set_description('Train loss: %.3f' % (train_loss / (i + 1)))
+            
+            # 收集训练预测
+            pred = output.data.cpu().numpy()
+            pred = np.argmax(pred, axis=1)
+            label = lbl.cpu().numpy()
+            train_evaluator.add_batch(label, pred)
+
         print('Epoch: %d, numImages: %5d' % (epoch+1, num_batch * self.args.BATCH_SIZE))
         print('Train Loss: %.3f' % (train_loss / num_batch))
-        return train_loss / num_batch
+        
+        # 计算训练指标
+        train_metrics = compute_metrics_from_evaluator(train_evaluator, self.args.NUM_CLASS)
+        
+        return train_loss / num_batch, train_metrics
 
     def validation(self, epoch):
         self.model.eval()
@@ -263,6 +405,9 @@ class Trainer(object):
         val_loss = 0.0
         val_loader = tqdm(self.val_loader)
         num_batch = len(self.val_loader)
+        
+        # 测量推理时间
+        inference_times = []
 
         with torch.no_grad():
             for i, sample in enumerate(val_loader):
@@ -270,34 +415,69 @@ class Trainer(object):
                 if torch.cuda.is_available():
                     image = image.cuda(self.args.GPU_ID, non_blocking=True).float()
                     label = label.cuda(self.args.GPU_ID, non_blocking=True).long()
+                
+                # 测量推理时间
+                if torch.cuda.is_available():
+                    torch.cuda.synchronize()
+                start = time.time()
+                
                 output = self.model(image).float()
+                
+                if torch.cuda.is_available():
+                    torch.cuda.synchronize()
+                inference_times.append(time.time() - start)
+                
                 loss = self.criterion(output, label)
                 val_loss = val_loss + loss.item()
                 val_loader.set_description('Val loss: %.3f' % (val_loss / (i + 1)))
+                
                 pred = output.data.cpu().numpy()
                 label = label.cpu().numpy()
                 pred = np.argmax(pred, axis=1)
                 self.evaluator.add_batch(label, pred)
 
+        # 计算指标
         Acc = self.evaluator.OverAll_Accuracy()
         Kappa = self.evaluator.Kappa()
-
         mIoU, IoU = self.evaluator.mean_Intersection_over_Union()
         mIoU0, mIoU1 = IoU
-
         FWIoU = self.evaluator.Frequency_Weighted_Intersection_over_Union()
-
         mPrecision, Precision = self.evaluator.Precision()
         Precision0, Precision1 = Precision
-
         mRecall, Recall = self.evaluator.Recall()
         Recall0, Recall1 = Recall
-
         mF1_score, F1_score = self.evaluator.F1_Score()
         F1_score0, F1_score1 = F1_score
-
         mF2_score, F2_score = self.evaluator.F2_Score()
         F2_score0, F2_score1 = F2_score
+
+        # 保存详细指标用于CSV记录
+        self.last_detailed_metrics = [
+            Acc, Kappa, mIoU, mIoU0, mIoU1, FWIoU,
+            mPrecision, Precision0, Precision1,
+            mRecall, Recall0, Recall1,
+            mF1_score, F1_score0, F1_score1,
+            mF2_score, F2_score0, F2_score1
+        ]
+
+        # 计算推理时间
+        inference_time_ms = np.mean(inference_times) * 1000
+        fps = self.args.BATCH_SIZE / np.mean(inference_times) if np.mean(inference_times) > 0 else 0
+
+        # 提取核心指标
+        val_metrics = {
+            'acc': Acc,
+            'kappa': Kappa,
+            'miou': mIoU,
+            'precision': mPrecision,
+            'recall': mRecall,
+            'f1': mF1_score,
+        }
+
+        # 更新最佳mIoU
+        if mIoU > self.best_miou:
+            self.best_miou = mIoU
+            print(f"New best model! mIoU: {mIoU:.4f}")
 
         print('Validation Result:')
         print('Epoch:%d, numImages: %5d' % (epoch+1, num_batch * self.args.BATCH_SIZE))
@@ -305,10 +485,9 @@ class Trainer(object):
               "Precision: {:.4f}, Recall: {:.4f}, f1_score: {:.4f}, f2_score: {:.4f}."
               .format(epoch+1, Acc, Kappa, mIoU, FWIoU, mPrecision, mRecall, mF1_score, mF2_score))
         print('Val Loss: %.3f' % (val_loss / num_batch))
+        print('Inference Time: %.4f ms, FPS: %.2f' % (inference_time_ms, fps))
 
-        return (val_loss/num_batch, Acc, Kappa, mIoU, mIoU0, mIoU1, FWIoU, 
-                mPrecision, Precision0, Precision1, mRecall, Recall0, Recall1,
-                mF1_score, F1_score0, F1_score1, mF2_score, F2_score0, F2_score1)
+        return val_loss/num_batch, val_metrics, inference_time_ms, fps
 
 
 if __name__ == '__main__':
