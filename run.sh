@@ -19,6 +19,36 @@ python train_water.py `
     --INIT_LR 0.0005 `
     --GPU_ID 0
 
+#模型训练（pro）
+python train_water_val_pro.py `
+    --TRAIN_IMAGE_DIR D:\Files\Data\IRWSB\train\images `
+    --TRAIN_MASK_DIR D:\Files\Data\IRWSB\train\masks_white_noSuffix `
+    --VAL_IMAGE_DIR D:\Files\Data\IRWSB\val\images `
+    --VAL_MASK_DIR D:\Files\Data\IRWSB\val\masks_white_noSuffix `
+    --EPOCHS 5 `
+    --BATCH_SIZE 4 `
+    --lr 1e-4 `
+    --model-dir checkpoints/exp_upernet_swin `
+    --model-name upernet_swin_exp01 `
+    --log-dir logs/exp_upernet_swin `
+    --log-name upernet_swin_exp01 `
+    --save-interval 0
+python train_water_val_pro.py `
+    --TRAIN_IMAGE_DIR D:\Files\Data\IRWSB\train\images `
+    --TRAIN_MASK_DIR D:\Files\Data\IRWSB\train\masks_white_noSuffix `
+    --VAL_IMAGE_DIR D:\Files\Data\IRWSB\val\images `
+    --VAL_MASK_DIR D:\Files\Data\IRWSB\val\masks_white_noSuffix `
+    --MODEL_TYPE upernet `
+    --BACKBONE_TYPE swin_t `
+    --EPOCHS 5 `
+    --BATCH_SIZE 4 `
+    --lr 1e-4 `
+    --model-dir checkpoints/exp_upernet_swin `
+    --model-name upernet_swin_exp01 `
+    --log-dir logs/exp_upernet_swin `
+    --log-name upernet_swin_exp01 `
+    --save-interval 0 `
+    --LOSS_TYPE focal
 
 #模型测试
 python test_water.py `
