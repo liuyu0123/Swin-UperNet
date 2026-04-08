@@ -87,3 +87,16 @@ python predict_water_folder.py `
     --NUM_CLASS 2 `
     --IMG_SIZE 256 `
     --MODEL_PATH "pth_files/upernet-epoch14-loss0.113-val_loss0.091.pth"
+
+#保存mask红色蒙版图片和csv性能文件
+python predict_water_folder_pro.py `
+    "D:\Files\Data\IRWSB\analyse\images" `
+    -o "./predictions_pro" `
+    -g "D:\Files\Data\IRWSB\analyse\masks_white_noSuffix" `
+    --MODEL_PATH "F:\AAA\6_swinupernet_best\experiment1\experiment1_last.pth" `
+    --MODEL_TYPE upernet `
+    --BACKBONE_TYPE swin_t `
+    --BANDS 3 `
+    --NUM_CLASS 2 `
+    --IMG_SIZE 256
+

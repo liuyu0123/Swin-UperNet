@@ -2,6 +2,7 @@ __pycache__
 log
 pth_files
 predictions
+predictions_pro
 result.png
 upernet_training_log.csv
 #git rm --cached upernet_training_log.csv
