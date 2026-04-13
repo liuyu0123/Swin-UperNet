@@ -8,6 +8,7 @@ from PIL import Image
 from tqdm import tqdm
 import glob
 import csv
+import time
 from typing import List, Dict, Optional, Tuple
 from pathlib import Path
 from collections import Counter
@@ -92,31 +93,47 @@ def load_ground_truth(mask_path: str, target_size: Tuple[int, int]) -> Optional[
 
 
 def process_single_image(image_path: str, model: torch.nn.Module, device: torch.device,
-                        args, output_dir: Optional[str] = None, 
-                        gt_dir: Optional[str] = None) -> Optional[Dict]:
+                        args, output_dir: Optional[str] = None,
+                        gt_dir: Optional[str] = None,
+                        measure_time: bool = True) -> Optional[Dict]:
     """处理单张图像"""
     try:
         basename = Path(image_path).name
-        
+
         # 预处理
         image_tensor, original_size = preprocess_image(image_path, args.BANDS, args.IMG_SIZE)
         image_tensor = image_tensor.to(device).float()
-        
-        # 推理
+
+        # 推理（带计时）
         with torch.no_grad():
+            if measure_time:
+                if torch.cuda.is_available():
+                    torch.cuda.synchronize()
+                start_time = time.perf_counter()
+
             output = model(image_tensor)
             pred = torch.argmax(output, dim=1)
-        
+
+            if measure_time:
+                if torch.cuda.is_available():
+                    torch.cuda.synchronize()
+                end_time = time.perf_counter()
+                inference_time = end_time - start_time
+                fps = 1.0 / inference_time if inference_time > 0 else 0.0
+            else:
+                inference_time = None
+                fps = None
+
         # 后处理恢复尺寸
         pred = postprocess_prediction(pred, original_size, args.NUM_CLASS)
-        
+
         # 保存叠加图（如果提供output_dir）
         if output_dir:
             os.makedirs(output_dir, exist_ok=True)
             overlay = create_overlay(image_path, pred, alpha=0.4)
             save_path = os.path.join(output_dir, f"{Path(image_path).stem}_overlay.png")
             Image.fromarray(overlay).save(save_path)
-        
+
         # 评估（如果提供gt_dir）
         metrics = None
         if gt_dir:
@@ -128,7 +145,12 @@ def process_single_image(image_path: str, model: torch.nn.Module, device: torch.
                     metrics['image_name'] = basename
             else:
                 print(f"警告: 未找到 {basename} 的真值mask")
-        
+
+        # 附加推理时间信息
+        if metrics is not None and inference_time is not None:
+            metrics['inference_time'] = inference_time
+            metrics['fps'] = fps
+
         return metrics
     
     except Exception as e:
@@ -142,7 +164,7 @@ def save_metrics_to_csv(metrics_list: List[Dict], output_path: str):
     """保存指标到CSV，包含每图结果和平均值"""
     if not metrics_list:
         return
-    
+
     # 计算平均值
     avg = {
         'image_name': 'AVERAGE',
@@ -151,17 +173,20 @@ def save_metrics_to_csv(metrics_list: List[Dict], output_path: str):
         'f1_score': np.mean([m['f1_score'] for m in metrics_list]),
         'miou': np.mean([m['miou'] for m in metrics_list]),
         'water_iou': np.mean([m['water_iou'] for m in metrics_list]),
-        'non_water_iou': np.mean([m['non_water_iou'] for m in metrics_list])
+        'non_water_iou': np.mean([m['non_water_iou'] for m in metrics_list]),
+        'inference_time': np.mean([m['inference_time'] for m in metrics_list]),
+        'fps': np.mean([m['fps'] for m in metrics_list])
     }
-    
+
     # 写入CSV
-    fieldnames = ['image_name', 'precision', 'recall', 'f1_score', 'miou', 'water_iou', 'non_water_iou']
+    fieldnames = ['image_name', 'precision', 'recall', 'f1_score', 'miou',
+                  'water_iou', 'non_water_iou', 'inference_time', 'fps']
     with open(output_path, 'w', newline='') as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
         for m in metrics_list + [avg]:
             writer.writerow({k: m.get(k, '') for k in fieldnames})
-    
+
     print(f"\n评估结果已保存: {output_path}")
 
 
@@ -246,21 +271,29 @@ def main():
         raise FileNotFoundError(f"未找到模型: {args.MODEL_PATH}")
     
     model.eval()
-    
+
     # 获取输入图像
     image_paths = get_image_paths(args.INPUT)
     print(f"\n找到 {len(image_paths)} 张图像")
     if not image_paths:
         return
-    
+
+    # Warm-up：用第一张图预热，避免CUDA/CNN初始化时间污染首图性能
+    print("正在进行 Warm-up（第一张图不计时）...")
+    _ = process_single_image(image_paths[0], model, device, args,
+                             output_dir=None, gt_dir=None, measure_time=False)
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
+    print("Warm-up 完成\n")
+
     # 批量处理
     all_metrics = []
     for img_path in tqdm(image_paths, desc="处理进度"):
-        metrics = process_single_image(img_path, model, device, args, 
+        metrics = process_single_image(img_path, model, device, args,
                                       args.output_dir, args.ground_truth_dir)
         if metrics:
             all_metrics.append(metrics)
-    
+
     # 输出评估结果
     if args.ground_truth_dir and all_metrics:
         if args.output_dir:
@@ -272,14 +305,19 @@ def main():
             print("评估结果（无output_dir，仅终端输出）")
             print("="*60)
             for m in all_metrics:
-                print(f"{m['image_name']}: P={m['precision']:.3f}, R={m['recall']:.3f}, F1={m['f1_score']:.3f}, mIoU={m['miou']:.3f}")
-            
+                print(f"{m['image_name']}: P={m['precision']:.3f}, R={m['recall']:.3f}, "
+                      f"F1={m['f1_score']:.3f}, mIoU={m['miou']:.3f}, "
+                      f"Time={m['inference_time']:.4f}s, FPS={m['fps']:.2f}")
+
             avg_p = np.mean([m['precision'] for m in all_metrics])
             avg_r = np.mean([m['recall'] for m in all_metrics])
             avg_f1 = np.mean([m['f1_score'] for m in all_metrics])
             avg_miou = np.mean([m['miou'] for m in all_metrics])
+            avg_time = np.mean([m['inference_time'] for m in all_metrics])
+            avg_fps = np.mean([m['fps'] for m in all_metrics])
             print("-"*60)
-            print(f"AVERAGE:       P={avg_p:.3f}, R={avg_r:.3f}, F1={avg_f1:.3f}, mIoU={avg_miou:.3f}")
+            print(f"AVERAGE:       P={avg_p:.3f}, R={avg_r:.3f}, F1={avg_f1:.3f}, mIoU={avg_miou:.3f}, "
+                  f"Time={avg_time:.4f}s, FPS={avg_fps:.2f}")
             print("="*60)
     
     print(f"\n✓ 完成！共处理 {len(image_paths)} 张图像")

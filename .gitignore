@@ -10,3 +10,4 @@ upernet_training_log_standard_model_info.txt
 upernet_training_log_standard.csv
 checkpoints/
 logs/
+.claude/
