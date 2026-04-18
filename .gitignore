@@ -1,0 +1,13 @@
+__pycache__
+log
+pth_files
+predictions
+predictions_pro
+result.png
+upernet_training_log.csv
+#git rm --cached upernet_training_log.csv
+upernet_training_log_standard_model_info.txt
+upernet_training_log_standard.csv
+checkpoints/
+logs/
+.claude/
